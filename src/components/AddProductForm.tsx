@@ -1,26 +1,23 @@
 "use client";
 
 import React, { useState } from "react";
+import ImageUploader from "./ImageUploader";
 
 interface AddProductFormProps {
-    userId?: string;
+    // We no longer need the userId prop for creation
     onSuccess: () => void;
     onCancel: () => void;
 }
 
-export default function AddProductForm({
-    userId,
-    onSuccess,
-    onCancel,
-}: AddProductFormProps) {
+export default function AddProductForm({ onSuccess, onCancel }: AddProductFormProps) {
     const [name, setName] = useState("");
     const [price, setPrice] = useState("");
     const [description, setDescription] = useState("");
-    const [imageUrl, setImageUrl] = useState("");
     const [category, setCategory] = useState("");
     const [inStock, setInStock] = useState(true);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState("");
+    const [images, setImages] = useState<string[]>([]);
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -35,10 +32,11 @@ export default function AddProductForm({
                     name,
                     price,
                     description,
-                    imageUrl,
                     category,
                     inStock,
-                    userId,
+                    images,
+                    // IMPORTANT: We have removed the `userId` field.
+                    // The backend will handle assigning the user automatically.
                 }),
             });
 
@@ -48,6 +46,12 @@ export default function AddProductForm({
             }
 
             await res.json();
+            setName("");
+            setPrice("");
+            setDescription("");
+            setCategory("");
+            setInStock(true);
+            setImages([]);
             onSuccess();
         } catch (err: any) {
             console.error("AddProductForm error:", err);
@@ -58,12 +62,8 @@ export default function AddProductForm({
     };
 
     return (
-        <form
-            onSubmit={handleSubmit}
-            className="bg-white border rounded-lg p-4 shadow-md"
-        >
+        <form onSubmit={handleSubmit} className="bg-white border rounded-lg p-4 shadow-md">
             <h3 className="text-lg font-semibold mb-4">Add New Product</h3>
-
             {error && <p className="text-red-600 text-sm mb-3">{error}</p>}
 
             {/* Name */}
@@ -96,9 +96,7 @@ export default function AddProductForm({
 
             {/* Description */}
             <div className="mb-3">
-                <label className="block text-sm font-medium text-gray-700">
-                    Description
-                </label>
+                <label className="block text-sm font-medium text-gray-700">Description</label>
                 <textarea
                     value={description}
                     onChange={(e) => setDescription(e.target.value)}
@@ -107,25 +105,15 @@ export default function AddProductForm({
                 />
             </div>
 
-            {/* Image URL */}
+            {/* Images */}
             <div className="mb-3">
-                <label className="block text-sm font-medium text-gray-700">
-                    Image URL
-                </label>
-                <input
-                    type="url"
-                    value={imageUrl}
-                    onChange={(e) => setImageUrl(e.target.value)}
-                    placeholder="https://example.com/product.jpg"
-                    className="mt-1 w-full border rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
+                <label className="block text-sm font-medium text-gray-700">Product Images</label>
+                <ImageUploader onChange={setImages} />
             </div>
 
             {/* Category */}
             <div className="mb-3">
-                <label className="block text-sm font-medium text-gray-700">
-                    Category
-                </label>
+                <label className="block text-sm font-medium text-gray-700">Category</label>
                 <input
                     type="text"
                     value={category}
@@ -134,7 +122,7 @@ export default function AddProductForm({
                 />
             </div>
 
-            {/* In Stock Toggle */}
+            {/* In Stock */}
             <div className="mb-4 flex items-center">
                 <input
                     type="checkbox"
@@ -142,9 +130,7 @@ export default function AddProductForm({
                     onChange={(e) => setInStock(e.target.checked)}
                     className="h-4 w-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
                 />
-                <label className="ml-2 block text-sm text-gray-700">
-                    In Stock
-                </label>
+                <label className="ml-2 block text-sm text-gray-700">In Stock</label>
             </div>
 
             {/* Buttons */}

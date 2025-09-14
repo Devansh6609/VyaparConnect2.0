@@ -1,11 +1,33 @@
-// src/app/api/webhooks/whatsapp/route.ts
 import { NextResponse } from "next/server";
 import { PrismaClient } from "@prisma/client";
 import { getIO } from "@/lib/socket";
 
 const prisma = new PrismaClient();
+const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
 
-// ✅ Webhook verification
+// This helper function gets the actual public URL for a media item from Meta's servers.
+async function getMediaUrl(mediaId: string): Promise<string | null> {
+  if (!accessToken) {
+    console.error("WhatsApp Access Token is missing. Cannot fetch media URL.");
+    return null;
+  }
+  try {
+    const res = await fetch(`https://graph.facebook.com/v20.0/${mediaId}`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (!res.ok) {
+      console.error("Failed to fetch media URL from Meta:", await res.json());
+      return null;
+    }
+    const data = await res.json();
+    return data.url || null;
+  } catch (error) {
+    console.error("Failed to fetch media URL from Meta:", error);
+    return null;
+  }
+}
+
+// Your GET function for webhook verification remains the same.
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
   const mode = searchParams.get("hub.mode");
@@ -21,94 +43,79 @@ export async function GET(req: Request) {
   }
 }
 
-// ✅ Incoming messages
 export async function POST(req: Request) {
   try {
     const body = await req.json();
     console.log("📩 Incoming WhatsApp webhook:", JSON.stringify(body, null, 2));
 
-    const entry = body.entry?.[0];
-    const changes = entry?.changes?.[0];
-    const value = changes?.value;
-    const message = value?.messages?.[0];
-    const contacts = value?.contacts?.[0];
+    const messageData = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+    const contactData = body.entry?.[0]?.changes?.[0]?.value?.contacts?.[0];
 
-    if (!message || !contacts) {
-      return NextResponse.json({
-        status: "success",
-        message: "Not a user message or incomplete data",
-      });
+    if (!messageData || !contactData) {
+      return new NextResponse(null, { status: 200 });
     }
 
-    const phone = contacts.wa_id;
-    const profileName = contacts.profile?.name || "Unknown";
+    const fromPhone = messageData.from;
+    const customerName = contactData.profile.name || "Unknown";
+    const messageType = messageData.type;
+    const incomingWamid = messageData.id;
 
-    // 1️⃣ Ensure user exists
-    let user = await prisma.user.findUnique({ where: { phone } });
-    if (!user) {
-      user = await prisma.user.create({
-        data: {
-          name: profileName,
-          phone,
-          email: `${phone}@autouser.local`,
-          password: "temp-password", // placeholder until auth system
-        },
-      });
-      console.log(`✅ New user created for phone: ${phone}`);
+    let messageText: string | null = null;
+    let mediaUrl: string | null = null;
+    let replyToText: string | null = null;
+
+    switch (messageType) {
+      case "text":
+        messageText = messageData.text?.body || null;
+        break;
+      case "image":
+        messageText = messageData.image?.caption || null;
+        const imageId = messageData.image?.id;
+        if (imageId) mediaUrl = await getMediaUrl(imageId);
+        break;
+      default:
+        messageText = "Unsupported message type received";
     }
 
-    // 2️⃣ Upsert contact
+    const replyContext = messageData.context;
+    if (replyContext && replyContext.id) {
+      // ✅ THE FIX: Use `findFirst` instead of `findUnique`. This is more flexible
+      // and allows us to search by the `wamid` field without crashing.
+      const repliedToMessage = await prisma.message.findFirst({
+        where: { wamid: replyContext.id },
+      });
+      replyToText = repliedToMessage?.text
+        ? `"${repliedToMessage.text}"`
+        : "an earlier message";
+    }
+
     const contact = await prisma.contact.upsert({
-      where: { phone },
-      update: {
-        name: profileName,
-        userId: user.id,
-      },
+      where: { phone: fromPhone },
+      update: { name: customerName },
       create: {
-        name: profileName,
-        phone,
-        userId: user.id,
+        name: customerName,
+        phone: fromPhone,
+        user: { connect: { email: "demo@vyaparconnect.com" } },
       },
     });
 
-    // 3️⃣ Save incoming message
     const savedMessage = await prisma.message.create({
       data: {
-        from: phone,
+        from: fromPhone,
         to: "business",
-        text: message.text?.body || null,
-        type: message.type,
-        mediaUrl:
-          message.image?.link ||
-          message.video?.link ||
-          message.audio?.link ||
-          message.document?.link ||
-          null,
+        text: messageText,
+        mediaUrl: mediaUrl,
+        type: messageType,
         contactId: contact.id,
+        replyToText: replyToText,
+        wamid: incomingWamid,
       },
     });
 
-    // 4️⃣ Increment unread count for this contact
-    await prisma.contact.update({
-      where: { id: contact.id },
-      data: {
-        unreadCount: { increment: 1 },
-        updatedAt: new Date(),
-      },
-    });
-
-    // 5️⃣ Emit real-time event
-    const io = getIO();
-    if (io) {
-      io.emit("newMessage", savedMessage);
-    }
-
-    return NextResponse.json({ success: true });
-  } catch (err) {
-    console.error("❌ Webhook error:", err);
-    return NextResponse.json(
-      { error: "Failed to process webhook" },
-      { status: 500 }
-    );
+    getIO()?.emit("newMessage", savedMessage);
+    return new NextResponse(null, { status: 200 });
+  } catch (error) {
+    console.error("❌ Webhook error:", error);
+    return new NextResponse(null, { status: 200 });
   }
 }

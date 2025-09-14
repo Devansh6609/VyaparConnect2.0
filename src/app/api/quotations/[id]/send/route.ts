@@ -1,61 +1,86 @@
+// src/app/api/quotations/[id]/send/route.ts
 import { NextResponse } from "next/server";
-import PDFDocument from "pdfkit";
 import { PrismaClient } from "@prisma/client";
 import Razorpay from "razorpay";
-import fs from "fs";
-import path from "path";
+import { getIO } from "@/lib/socket";
 
 const prisma = new PrismaClient();
 
-// Razorpay setup
+const keyId = process.env.RAZORPAY_KEY_ID || "";
+const keySecret = process.env.RAZORPAY_KEY_SECRET || "";
+
 const razorpay = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID!,
-  key_secret: process.env.RAZORPAY_KEY_SECRET!,
+  key_id: keyId,
+  key_secret: keySecret,
 });
 
 export async function POST(
   req: Request,
   { params }: { params: { id: string } }
 ) {
+  const quotationId = params.id;
+  const baseUrl = new URL(req.url).origin;
+
+  const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
+  const phoneId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+
+  if (!accessToken || !phoneId) {
+    return NextResponse.json(
+      { error: "Missing WhatsApp environment variables" },
+      { status: 500 }
+    );
+  }
+
   try {
     const quotation = await prisma.quotation.findUnique({
-      where: { id: params.id },
-      include: { product: true, contact: true },
+      where: { id: quotationId },
+      include: { contact: true },
     });
 
-    if (!quotation) {
-      return NextResponse.json({ error: "Quotation not found" }, { status: 404 });
+    if (!quotation || !quotation.contact) {
+      return NextResponse.json(
+        { error: "Quotation or associated contact not found" },
+        { status: 404 }
+      );
     }
 
-    // 1. Generate PDF file and save locally (or upload later)
-    const pdfPath = path.join(
-      process.cwd(),
-      `public/quotation-${quotation.id}.pdf`
+    // 1️⃣ Fetch image from generate-image route
+    const imageRes = await fetch(
+      `${baseUrl}/api/quotations/${quotationId}/generate-image`
     );
-    const doc = new PDFDocument();
-    const stream = fs.createWriteStream(pdfPath);
-    doc.pipe(stream);
+    if (!imageRes.ok) {
+      throw new Error("Failed to generate quotation image");
+    }
+    const imageBuffer = await imageRes.arrayBuffer();
 
-    doc.fontSize(20).text("Quotation", { align: "center" }).moveDown();
-    doc.text(`Customer: ${quotation.customerName}`);
-    doc.text(`Phone: ${quotation.contactNumber}`);
-    doc.text(`Address: ${quotation.address}`).moveDown();
-    doc.text(`Product: ${quotation.product.name}`);
-    doc.text(`Quantity: ${quotation.quantity}`);
-    doc.text(`Price: ₹${quotation.price}`);
-    doc.text(`Total: ₹${quotation.total}`);
-    doc.text(`Date: ${quotation.createdAt.toDateString()}`);
+    // 2️⃣ Upload to ImgBB (or Cloudinary if you prefer)
+    const formData = new FormData();
+    formData.append(
+      "image",
+      new Blob([imageBuffer], { type: "image/png" }),
+      `quotation-${quotationId}.png`
+    );
 
-    doc.end();
+    const uploadRes = await fetch(
+      `https://api.imgbb.com/1/upload?key=${process.env.NEXT_PUBLIC_IMGBB_API_KEY}`,
+      {
+        method: "POST",
+        body: formData,
+      }
+    );
+    const uploadData = await uploadRes.json();
 
-    await new Promise((resolve) => stream.on("finish", resolve));
+    if (!uploadRes.ok || !uploadData.data.url) {
+      throw new Error("Image upload failed");
+    }
 
-    const pdfUrl = `/quotation-${quotation.id}.pdf`; // accessible from /public
+    const imageUrl = uploadData.data.url;
 
-    // 2. Create Razorpay payment link
+    // 3️⃣ Create Razorpay payment link
     const paymentLink = await razorpay.paymentLink.create({
-      amount: quotation.total * 100, // in paise
+      amount: Math.round(quotation.total * 100),
       currency: "INR",
+      description: `Payment for Quotation #${quotation.id}`,
       customer: {
         name: quotation.customerName,
         contact: quotation.contactNumber,
@@ -64,21 +89,56 @@ export async function POST(
       reminder_enable: true,
     });
 
-    // 3. Save a message in DB
-    await prisma.message.create({
+    // 4️⃣ Save message in DB
+    const savedMessage = await prisma.message.create({
       data: {
         from: "business",
-        to: quotation.contact?.phone || "unknown",
-        type: "document",
-        text: `Your quotation is ready. Pay here: ${paymentLink.short_url}`,
-        mediaUrl: pdfUrl,
-        contactId: quotation.contactId!,
+        to: quotation.contact.phone,
+        type: "image",
+        text: `Quotation #${quotation.id}`,
+        mediaUrl: imageUrl,
+        contactId: quotation.contact.id,
       },
     });
 
-    return NextResponse.json({ success: true, pdfUrl, paymentLink });
-  } catch (error) {
-    console.error("Send quotation error:", error);
-    return NextResponse.json({ error: "Failed to send quotation" }, { status: 500 });
+    getIO()?.emit("newMessage", savedMessage);
+
+    // 5️⃣ Send image to WhatsApp
+    await fetch(`https://graph.facebook.com/v20.0/${phoneId}/messages`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        to: quotation.contact.phone,
+        type: "image",
+        image: { link: imageUrl },
+      }),
+    });
+
+    // 6️⃣ Send payment link as separate text message
+    await fetch(`https://graph.facebook.com/v20.0/${phoneId}/messages`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        to: quotation.contact.phone,
+        type: "text",
+        text: { body: `You can pay securely here: ${paymentLink.short_url}` },
+      }),
+    });
+
+    return NextResponse.json({ success: true, imageUrl, paymentLink });
+  } catch (error: any) {
+    console.error("❌ Send quotation error:", error);
+    return NextResponse.json(
+      { error: error.message || "Failed to send quotation" },
+      { status: 500 }
+    );
   }
 }

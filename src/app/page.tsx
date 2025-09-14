@@ -1,33 +1,44 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useState } from "react"
 import ChatModule from "@/components/ChatModule"
 import RightPanel from "@/components/RightPanel"
 
-export default function DashboardPage() {
-  const [isRightOpen, setIsRightOpen] = useState(true)
-  const [products, setProducts] = useState([]);
+// Define the Contact type here to be shared across components
+type Contact = {
+  id: string;
+  name: string;
+  phone: string;
+  avatarUrl?: string | null;
+  lastAddress?: string;
+};
 
-  useEffect(() => {
-    fetch("/api/products")
-      .then((res) => res.json())
-      .then((data) => setProducts(data))
-      .catch((err) => console.error("Failed to fetch products", err));
-  }, []);
+export default function DashboardPage() {
+  const [isRightOpen, setIsRightOpen] = useState(true);
+
+  // ✅ STATE LIFTED UP: This page now manages the active contact
+  const [activeContact, setActiveContact] = useState<Contact | null>(null);
 
   return (
     <div className="flex h-screen overflow-hidden">
       {/* Chat Section (Left + Center) */}
       <div
-        className={`transition-all duration-300 ease-in-out ${isRightOpen ? "flex-[1]" : "flex-1"
-          }`}
+        className={`transition-all duration-300 ease-in-out flex-1`}
       >
-        <ChatModule />
+        {/* ✅ PASS DOWN: We pass the state and the function to update it */}
+        <ChatModule
+          activeContact={activeContact}
+          onSelectContact={setActiveContact}
+        />
       </div>
 
       {/* Right Panel */}
-      <RightPanel isOpen={isRightOpen} onToggle={() => setIsRightOpen(!isRightOpen)} />
-
+      {/* ✅ PASS DOWN: We pass the active contact to the right panel */}
+      <RightPanel
+        isOpen={isRightOpen}
+        onToggle={() => setIsRightOpen(!isRightOpen)}
+        activeContact={activeContact}
+      />
     </div>
   )
 }

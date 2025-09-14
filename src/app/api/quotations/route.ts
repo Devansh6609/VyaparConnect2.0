@@ -3,29 +3,34 @@ import { PrismaClient } from "@prisma/client";
 
 const prisma = new PrismaClient();
 
-// GET /api/quotations → list all quotations
-export async function GET() {
+export async function GET(req: Request) {
+  const { searchParams } = new URL(req.url);
+  const contactId = searchParams.get("contactId");
+
+  if (!contactId) {
+    return NextResponse.json(
+      { error: "contactId is required" },
+      { status: 400 }
+    );
+  }
+
   try {
     const quotations = await prisma.quotation.findMany({
-      include: {
-        product: true,
-        contact: true,
-        user: true,
-      },
+      where: { contactId },
+      include: { items: { include: { product: true } } },
       orderBy: { createdAt: "desc" },
     });
 
     return NextResponse.json(quotations);
-  } catch (err) {
-    console.error("GET /api/quotations error:", err);
+  } catch (error) {
+    console.error("GET /api/quotations error:", error);
     return NextResponse.json(
       { error: "Failed to fetch quotations" },
       { status: 500 }
     );
   }
 }
-
-// POST /api/quotations → create new quotation
+// POST /api/quotations
 export async function POST(req: Request) {
   try {
     const body = await req.json();
@@ -33,71 +38,71 @@ export async function POST(req: Request) {
       customerName,
       contactNumber,
       address,
-      productId,
-      quantity,
-      price,
-      total,
-      userId,
+      items, // Expect array of { productId, quantity, price }
       contactId,
+      userId,
     } = body;
 
-    if (!customerName || !contactNumber || !productId || !quantity || !price) {
+    // --- Server-Side Validation ---
+    if (!contactId || !items || !Array.isArray(items) || items.length === 0) {
       return NextResponse.json(
-        { error: "Missing required fields" },
+        {
+          error:
+            "Missing required fields (contactId and at least one item are required)",
+        },
         { status: 400 }
       );
     }
 
-    // ensure product exists
-    const product = await prisma.product.findUnique({
-      where: { id: productId },
-    });
-    if (!product) {
-      return NextResponse.json({ error: "Product not found" }, { status: 404 });
-    }
+    // --- Server-Side Calculation for accuracy ---
+    const total = items.reduce(
+      (sum, item) =>
+        sum + (Number(item.price) || 0) * (Number(item.quantity) || 1),
+      0
+    );
 
-    // if contactId provided, connect; otherwise create/find contact
-    let contact = null;
-    if (contactId) {
-      contact = await prisma.contact.findUnique({ where: { id: contactId } });
-    }
-    if (!contact) {
-      contact = await prisma.contact.upsert({
-        where: { phone: contactNumber },
-        update: { name: customerName, lastAddress: address || undefined },
-        create: {
-          name: customerName,
-          phone: contactNumber,
-          lastAddress: address || undefined,
-          userId: userId || product.userId, // fallback
-        },
-      });
-    }
-
-    // create quotation
+    // --- Database Transaction ---
     const quotation = await prisma.quotation.create({
       data: {
         customerName,
         contactNumber,
         address,
-        productId,
-        quantity: parseInt(quantity, 10),
-        price: parseInt(price, 10),
-        total: parseInt(total, 10),
-        userId: userId || product.userId, // fallback
-        contactId: contact.id,
+        total, // This now matches the updated schema
+        contact: { connect: { id: contactId } },
+        // user: userId ? { connect: { id: userId } } : undefined,
+
+        // ✅ INSTEAD: We create the related "QuotationItem" records correctly here
+        items: {
+          createMany: {
+            data: items.map((item: any) => ({
+              productId: item.productId,
+              quantity: Number(item.quantity),
+              price: Number(item.price),
+            })),
+          },
+        },
       },
       include: {
-        product: true,
-        contact: true,
+        items: true, // Return the created items in the response
       },
     });
 
+    // Update the contact's last known address
+    if (address) {
+      await prisma.contact.update({
+        where: { id: contactId },
+        data: { lastAddress: address },
+      });
+    }
+
     return NextResponse.json(quotation, { status: 201 });
-  } catch (err) {
-    console.error("POST /api/quotations error:", err);
+  } catch (error) {
+    console.error("POST /api/quotations error:", error);
     return NextResponse.json(
-      { error: "Failed to create quotation" },
+      {
+        error:
+          "Failed to create quotation. Please ensure all product IDs are valid.",
+      },
       { status: 500 }
     );
   }
